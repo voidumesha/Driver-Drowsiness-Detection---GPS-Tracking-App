@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "907827978535",
+    "project_id": "drowsinessapp-90c39",
+    "storage_bucket": "drowsinessapp-90c39.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:907827978535:android:5897e5e5ae4b43f8e9c902",
+        "android_client_info": {
+          "package_name": "com.example.drowsinessapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD5HXW45j9a1Wm-NLZ0d0SEBTAkySWAzds"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

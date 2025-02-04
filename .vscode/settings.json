@@ -1,4 +1,5 @@
 {
   "java.compile.nullAnalysis.mode": "automatic",
-  "java.configuration.updateBuildConfiguration": "interactive"
+  "java.configuration.updateBuildConfiguration": "interactive",
+  "cmake.sourceDirectory": "C:/DRIVER_SLEEP_DETECTION_MODEL/DRIVER_SLEEP_DETECTION_AND_REACTION_SYSTEM/FlutterApp/Driver-Drowsiness-Detection---GPS-Tracking-App/linux"
 }
