@@ -1,0 +1,18 @@
+name: drowsiness_app
+description: A drowsiness detection app
+publish_to: "none"
+
+environment:
+  sdk: ">=3.6.0 <4.0.0"
+  flutter: ">=3.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  firebase_core: ^2.24.2
+  geolocator: ^13.0.2
+  cloud_firestore: ^4.17.5
+  google_maps_flutter: ^2.10.0
+  geocoding: ^3.0.0
+
+  # ... existing dependencies ...
