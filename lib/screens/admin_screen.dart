@@ -6,11 +6,11 @@ import 'dart:convert';
 class AdminScreen extends StatelessWidget {
   const AdminScreen({super.key});
 
-  Future<String> _getAddress(Map<String, dynamic> lastLocation) async {
+  Future<String> _getAddress(double lat, double lng) async {
     try {
       final String apiKey = 'AIzaSyDrQkjLbhOQRTmYTGmti785_MPrJFAj99w';
       final String url =
-          'https://maps.googleapis.com/maps/api/geocode/json?latlng=${lastLocation['latitude']},${lastLocation['longitude']}&key=$apiKey';
+          'https://maps.googleapis.com/maps/api/geocode/json?latlng=$lat,$lng&key=$apiKey';
 
       final response = await http.get(Uri.parse(url));
       final data = json.decode(response.body);
@@ -28,9 +28,9 @@ class AdminScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Journey History'),
+        title: const Text('Journey Reports'),
       ),
-      body: StreamBuilder<QuerySnapshot>(
+      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: FirebaseFirestore.instance
             .collection('journeys')
             .orderBy('startTime', descending: true)
@@ -44,45 +44,75 @@ class AdminScreen extends StatelessWidget {
             itemCount: snapshot.data!.docs.length,
             itemBuilder: (context, index) {
               final doc = snapshot.data!.docs[index];
-              final data = doc.data() as Map<String, dynamic>;
-              final lastLocation =
-                  data['lastLocation'] as Map<String, dynamic>?;
-              final startTime = (data['startTime'] as Timestamp).toDate();
-              final endTime = data['endTime'] != null
-                  ? (data['endTime'] as Timestamp).toDate()
-                  : null;
+              final data = doc.data();
 
-              return FutureBuilder<String>(
-                future: lastLocation != null
-                    ? _getAddress(lastLocation)
-                    : Future.value('No location data'),
-                builder: (context, addressSnapshot) {
-                  return Card(
-                    margin: const EdgeInsets.all(8.0),
-                    child: Padding(
-                      padding: const EdgeInsets.all(12.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Journey ${index + 1}',
-                            style: Theme.of(context).textTheme.titleLarge,
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                              'Started: ${startTime.toString().split('.')[0]}'),
-                          if (endTime != null)
-                            Text('Ended: ${endTime.toString().split('.')[0]}'),
-                          Text(
-                              'Status: ${data['isActive'] ? 'Active' : 'Completed'}'),
-                          const SizedBox(height: 4),
-                          Text(
-                              'Location: ${addressSnapshot.data ?? 'Loading...'}'),
-                        ],
+              return ExpansionTile(
+                title: Text('Journey ${index + 1}'),
+                subtitle: Text(
+                    'Status: ${data['isActive'] ? 'Active' : 'Completed'}\n'
+                    'Started: ${(data['startTime'] as Timestamp).toDate().toString().split('.')[0]}'),
+                children: [
+                  FutureBuilder<String>(
+                    future: _getAddress(
+                      data['startLocation']['latitude'],
+                      data['startLocation']['longitude'],
+                    ),
+                    builder: (context, startSnapshot) {
+                      return ListTile(
+                        title: Text('Start Location:'),
+                        subtitle: Text(startSnapshot.data ?? 'Loading...'),
+                      );
+                    },
+                  ),
+                  if (data['destination'] != null)
+                    FutureBuilder<String>(
+                      future: _getAddress(
+                        data['destination']['latitude'],
+                        data['destination']['longitude'],
+                      ),
+                      builder: (context, destSnapshot) {
+                        return ListTile(
+                          title: Text('Destination:'),
+                          subtitle: Text(destSnapshot.data ?? 'Loading...'),
+                        );
+                      },
+                    ),
+                  if (data['breaks'] != null)
+                    ...List.generate(
+                      (data['breaks'] as List).length,
+                      (i) => FutureBuilder<String>(
+                        future: _getAddress(
+                          data['breaks'][i]['location']['latitude'],
+                          data['breaks'][i]['location']['longitude'],
+                        ),
+                        builder: (context, breakSnapshot) {
+                          return ListTile(
+                            title: Text('Break ${i + 1}:'),
+                            subtitle: Text(
+                                'Time: ${(data['breaks'][i]['time'] as Timestamp).toDate().toString().split('.')[0]}\n'
+                                'Location: ${breakSnapshot.data ?? 'Loading...'}'),
+                          );
+                        },
                       ),
                     ),
-                  );
-                },
+                  if (data['alertLocations'] != null)
+                    ...List.generate(
+                      (data['alertLocations'] as List).length,
+                      (i) => FutureBuilder<String>(
+                        future: _getAddress(
+                          data['alertLocations'][i]['latitude'],
+                          data['alertLocations'][i]['longitude'],
+                        ),
+                        builder: (context, alertSnapshot) {
+                          return ListTile(
+                            leading: Icon(Icons.warning, color: Colors.red),
+                            title: Text('Alert Location ${i + 1}:'),
+                            subtitle: Text(alertSnapshot.data ?? 'Loading...'),
+                          );
+                        },
+                      ),
+                    ),
+                ],
               );
             },
           );

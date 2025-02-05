@@ -7,6 +7,7 @@ class LocationService {
   bool _isTracking = false;
   Stream<Position>? _positionStream;
   Function(Position)? onLocationUpdate;
+  Position? _currentPosition;
 
   Future<Position> getCurrentLocation() async {
     bool serviceEnabled;
@@ -30,21 +31,29 @@ class LocationService {
       throw 'Location permissions are permanently denied, we cannot request permissions.';
     }
 
-    return await Geolocator.getCurrentPosition();
+    _currentPosition = await Geolocator.getCurrentPosition();
+    return _currentPosition!;
   }
 
   Future<void> updateLocation(bool isStarting, {LatLng? destination}) async {
+    if (_currentPosition == null) {
+      _currentPosition = await getCurrentLocation();
+    }
+    
     if (isStarting && !_isTracking) {
-      DocumentReference journeyRef =
-          await _firestore.collection('journeys').add({
+      DocumentReference journeyRef = await _firestore.collection('journeys').add({
         'startTime': FieldValue.serverTimestamp(),
+        'startLocation': {
+          'latitude': _currentPosition!.latitude,
+          'longitude': _currentPosition!.longitude,
+        },
+        'destination': destination != null ? {
+          'latitude': destination.latitude,
+          'longitude': destination.longitude
+        } : null,
         'isActive': true,
-        'destination': destination != null
-            ? {
-                'latitude': destination.latitude,
-                'longitude': destination.longitude
-              }
-            : null,
+        'breaks': [], // Array to store break times
+        'alertLocations': [], // Array to store alert locations
       });
 
       _positionStream = Geolocator.getPositionStream(
@@ -55,7 +64,7 @@ class LocationService {
       );
 
       _positionStream!.listen((Position position) async {
-        // Notify listeners about location update
+        _currentPosition = position;
         onLocationUpdate?.call(position);
 
         await journeyRef.collection('locations').add({
@@ -91,6 +100,13 @@ class LocationService {
         await doc.reference.update({
           'isActive': false,
           'endTime': FieldValue.serverTimestamp(),
+          'breaks': FieldValue.arrayUnion([{
+            'time': FieldValue.serverTimestamp(),
+            'location': {
+              'latitude': _currentPosition!.latitude,
+              'longitude': _currentPosition!.longitude,
+            }
+          }])
         });
       }
     }

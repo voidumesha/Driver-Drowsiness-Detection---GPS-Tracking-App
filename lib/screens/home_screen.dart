@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../services/location_service.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'admin_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../services/alert_service.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -39,6 +41,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _getCurrentLocation();
     _restorePreviousRoute();
     _setupLocationUpdates();
+    _listenToAlerts();
   }
 
   void _setupLocationUpdates() {
@@ -282,12 +285,67 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  void _showDrowsinessAlert(String message) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 5),
+        action: SnackBarAction(
+          label: 'DISMISS',
+          textColor: Colors.white,
+          onPressed: () {
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).hideCurrentSnackBar();
+          },
+        ),
+      ),
+    );
+  }
+
+  void _listenToAlerts() {
+    AlertService.getAlerts().listen((snapshot) {
+      try {
+        if (snapshot.docs.isNotEmpty) {
+          for (var doc in snapshot.docs) {
+            final data = doc.data();
+            final message = data['message'];
+            if (message != null && mounted) {
+              _showDrowsinessAlert(message.toString());
+              AlertService.dismissAlert(doc.id);
+            }
+          }
+        }
+      } catch (e) {
+        print('Error processing alert: $e');
+      }
+    }, onError: (error) {
+      print('Error listening to alerts: $error');
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Driver Tracking'),
         actions: [
+          StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: AlertService.getAlerts(),
+            builder: (context, snapshot) {
+              if (snapshot.hasData && snapshot.data!.docs.isNotEmpty) {
+                return IconButton(
+                  icon: const Icon(Icons.warning, color: Colors.red),
+                  onPressed: () {
+                    // Show alert details if needed
+                  },
+                );
+              }
+              return const SizedBox.shrink();
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.admin_panel_settings),
             onPressed: () {
