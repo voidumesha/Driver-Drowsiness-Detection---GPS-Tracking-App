@@ -45,10 +45,8 @@ class _HomeScreenState extends State<HomeScreen> {
     _locationService.onLocationUpdate = (Position position) {
       setState(() {
         _currentPosition = position;
-        _updateMarkers();
       });
 
-      // Recalculate route if we have a destination
       if (_destinationLatLng != null) {
         _getDirections();
       }
@@ -60,13 +58,7 @@ class _HomeScreenState extends State<HomeScreen> {
       Position position = await _locationService.getCurrentLocation();
       setState(() {
         _currentPosition = position;
-        _markers.add(
-          Marker(
-            markerId: const MarkerId('current_location'),
-            position: LatLng(position.latitude, position.longitude),
-            infoWindow: const InfoWindow(title: 'Current Location'),
-          ),
-        );
+        // Remove the initial marker since we don't want it
       });
 
       _mapController?.animateCamera(
@@ -117,25 +109,16 @@ class _HomeScreenState extends State<HomeScreen> {
 
           // Update markers
           _markers.clear();
-          // Add current location marker
-          _markers.add(
-            Marker(
-              markerId: const MarkerId('current_location'),
-              position: LatLng(
-                  _currentPosition!.latitude, _currentPosition!.longitude),
-              infoWindow: const InfoWindow(title: 'Current Location'),
-            ),
-          );
-          // Add destination marker
-          _markers.add(
-            Marker(
-              markerId: const MarkerId('destination'),
-              position: _destinationLatLng!,
-              infoWindow: InfoWindow(title: _destinationController.text),
-              icon: BitmapDescriptor.defaultMarkerWithHue(
-                  BitmapDescriptor.hueRed),
-            ),
-          );
+          // Only add destination marker
+          if (_destinationLatLng != null) {
+            _markers.add(
+              Marker(
+                markerId: const MarkerId('destination'),
+                position: _destinationLatLng!,
+                infoWindow: InfoWindow(title: _destinationController.text),
+              ),
+            );
+          }
 
           // Update distance
           _distance =
@@ -253,41 +236,6 @@ class _HomeScreenState extends State<HomeScreen> {
         SnackBar(content: Text('Error searching location: $e')),
       );
     }
-  }
-
-  Future<BitmapDescriptor> _createMarkerIcon() async {
-    return await BitmapDescriptor.fromAssetImage(
-      const ImageConfiguration(size: Size(10, 10)),
-      'assets/bike_marker.png',
-    );
-  }
-
-  Future<void> _updateMarkers() async {
-    BitmapDescriptor markerIcon = await _createMarkerIcon();
-    setState(() {
-      _markers.clear();
-      if (_currentPosition != null) {
-        _markers.add(
-          Marker(
-            markerId: const MarkerId('current_location'),
-            position:
-                LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
-            icon: markerIcon,
-            rotation: _currentPosition!.heading, // Rotate based on heading
-            infoWindow: const InfoWindow(title: 'Current Location'),
-          ),
-        );
-      }
-      if (_destinationLatLng != null) {
-        _markers.add(
-          Marker(
-            markerId: const MarkerId('destination'),
-            position: _destinationLatLng!,
-            infoWindow: InfoWindow(title: _destinationController.text),
-          ),
-        );
-      }
-    });
   }
 
   Future<void> _handleStartStop(bool isStarting) async {
