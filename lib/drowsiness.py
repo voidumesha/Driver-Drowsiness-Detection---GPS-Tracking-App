@@ -1,264 +1,221 @@
-import os
 import cv2
+import time
+import imutils
+from datetime import datetime
+from scipy.spatial import distance as dist
+from imutils import face_utils
+import dlib
 import numpy as np
 import RPi.GPIO as GPIO
-import time
-from picamera2 import Picamera2, Preview
-import tflite_runtime.interpreter as tflite
-from collections import deque
 from RPLCD.i2c import CharLCD
-import firebase_admin
-from firebase_admin import credentials, firestore
-import datetime
 
-# ------------------- Suppress TensorFlow & OpenCV Warnings -------------------
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['DISPLAY'] = ':0'  # Ensure OpenCV GUI works on Raspberry Pi
-
-# ------------------- GPIO SETUP -------------------
-BUZZER_PIN = 17  
-GPIO.setwarnings(False)  
+# ===== GPIO Setup =====
+GPIO.setwarnings(False)
 GPIO.setmode(GPIO.BCM)
+
+BUZZER_PIN = 17
+BUTTON_PIN = 19
+LED_PIN = 21  # LED pin for the bulb
+
 GPIO.setup(BUZZER_PIN, GPIO.OUT)
+GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)  # Internal pull-up resistor
+GPIO.setup(LED_PIN, GPIO.OUT)  # Set LED pin as output
 
-# ------------------- LCD DISPLAY SETUP -------------------
-try:
-    lcd = CharLCD(i2c_expander='PCF8574', address=0x27, port=1,
-                  cols=16, rows=2, dotsize=8)
-    lcd.clear()
-    print("✅ LCD Display Connected Successfully!")
-except Exception as e:
-    print(f"❌ LCD Error: {str(e)}")
-    print("⚠ Continuing without LCD display...")
-    lcd = None
+# ===== LCD Setup (Address 0x27 detected) =====
+lcd = CharLCD(i2c_expander='PCF8574', address=0x27, port=1,
+              cols=20, rows=4, dotsize=8)
 
-def display_message(text, line=0):
-    try:
-        if lcd is not None:
-            clean_text = text.replace('🚨', '').replace('⚠', '').strip()
-            lcd.cursor_pos = (line, 0)
-            lcd.write_string(' ' * 16)  # Clear line
-            lcd.cursor_pos = (line, 0)
-            lcd.write_string(clean_text[:16])  # Truncate if needed
-    except Exception as e:
-        print(f"LCD Display Error: {str(e)}")
+lcd.clear()
+lcd.write_string("Initializing...")
+time.sleep(2)
+lcd.clear()
 
-def update_lcd_status(status_line1, status_line2=None):
-    display_message(status_line1, 0)
-    if status_line2:
-        display_message(status_line2, 1)
+# ===== System State Variables =====
+system_active = False
+last_button_state = GPIO.input(BUTTON_PIN)
+last_toggle_time = time.time()
+last_lcd_message = ""
+rest_start_time = None
+rest_duration = 0
 
-# ------------------- BUZZER ALERT FUNCTION -------------------
-def buzzer_alert(message="⚠ ALERT!"):
-    print(f"🔊 {message}")
-    display_message(message.replace('⚠', ''), 0)
+def buzzer_on():
     GPIO.output(BUZZER_PIN, GPIO.HIGH)
-    time.sleep(0.5)
+
+def buzzer_off():
     GPIO.output(BUZZER_PIN, GPIO.LOW)
 
-# ------------------- TFLITE MODEL SETUP -------------------
-interpreter = tflite.Interpreter(model_path="model_unquant.tflite")
-interpreter.allocate_tensors()
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
+def led_on():
+    GPIO.output(LED_PIN, GPIO.HIGH)
 
-def predict_tflite(image):
-    if image is None or image.size == 0:  
-        return None  
+def led_off():
+    GPIO.output(LED_PIN, GPIO.LOW)
 
-    image = cv2.resize(image, (224, 224))
-    image = image.astype("float32") / 255.0
-    image = np.expand_dims(image, axis=0)
+def lcd_message(line1, line2=""):
+    """Updates the LCD only if the message is different."""
+    global last_lcd_message
+    message = f"{line1} | {line2}"
     
-    interpreter.set_tensor(input_details[0]['index'], image)
-    interpreter.invoke()
-    output = interpreter.get_tensor(output_details[0]['index'])
+    if message != last_lcd_message:  # Prevent unnecessary updates
+        lcd.clear()
+        lcd.write_string(line1)
+        lcd.cursor_pos = (1, 0)
+        lcd.write_string(line2)
+        print(f"LCD: {line1} | {line2}")
+        last_lcd_message = message
+        time.sleep(1)
 
-    confidence = np.max(output)
-    prediction = np.argmax(output)
-
-    return prediction if confidence > 0.8 else None
-
-# ------------------- FACE & EYE DETECTION SETUP -------------------
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
-
-# ------------------- CSI CAMERA SETUP -------------------
-try:
-    from picamera2 import Picamera2
-    picam2 = Picamera2()
+def toggle_system():
+    """Toggles the system on/off when the button is pressed"""
+    global system_active, rest_start_time
+    system_active = not system_active
+    print(f"System {'Activated' if system_active else 'Paused'}")
     
-    # Simple configuration without format specification
-    config = picam2.create_preview_configuration(
-        main={"size": (640, 480)}
-    )
-    picam2.configure(config)
-    picam2.start()
-    print("✅ CSI Camera Connected Successfully!")
-except Exception as e:
-    print(f"❌ CSI Camera Error: {str(e)}")
-    print("Make sure the CSI camera is properly connected!")
-    print(f"Error details: {str(e)}")
-    exit(1)
+    if system_active:
+        buzzer_on()
+        led_on()
+        lcd_message("System Activated", "Monitoring ON")
+        time.sleep(1)
+        buzzer_off()
+        led_off()
+        rest_start_time = None  # Reset rest time when system is activated
+    else:
+        buzzer_on()
+        led_on()
+        lcd_message("System Paused", "Press to Start")
+        time.sleep(1)
+        buzzer_off()
+        led_off()
+        rest_start_time = time.time()  # Start tracking rest time
 
-# ------------------- DROWSINESS DETECTION VARIABLES -------------------
-eye_closed_start_time = None  
-face_missing_start_time = None
-paused = False  
-nap_alert_triggered = False  
+# ===== Dlib Face Detector Setup =====
+print("[INFO] Loading facial landmark predictor...")
+lcd_message("Loading Model", "Please Wait...")
+detector = dlib.get_frontal_face_detector()
+predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat')
 
-EYE_CLOSED_DURATION = 4.0  # Seconds
-EYE_CONSECUTIVE_FRAMES = 3  
-FACE_MISSING_THRESHOLD = 3  # Seconds before triggering continuous buzzer
+# Initialize USB webcam
+print("[INFO] Initializing USB webcam...")
+lcd_message("Initializing", "Camera...")
+cap = cv2.VideoCapture(0)
 
-yawning_timestamps = deque(maxlen=3)
+if not cap.isOpened():
+    print("❌ ERROR: Cannot access webcam!")
+    lcd_message("ERROR:", "No Camera Found")
+    exit()
 
-# Firebase initialization
-cred = credentials.Certificate("path/to/your/serviceAccountKey.json")
-firebase_admin.initialize_app(cred)
-db = firestore.client()
+# ===== Constants =====
+EYE_AR_THRESH = 0.25
+EYE_CLOSED_TIME = 4  # seconds
+FACE_MISSING_TIME = 2  # seconds before alert
+NECK_FALL_TIME = 2  # seconds for neck fall detection
+COUNTER = 0
+buzzer_active = False
+face_missing_since = None
+neck_fallen_since = None
+timer_start = None
 
-# Add this function to send alerts
-def send_drowsiness_alert(alert_type, message):
-    try:
-        if not message or not alert_type:
-            print("Invalid alert data")
-            return
+# Landmark indices
+(lStart, lEnd) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
+(rStart, rEnd) = face_utils.FACIAL_LANDMARKS_IDXS["right_eye"]
 
-        # Get current journey
-        journeys_ref = db.collection('journeys')
-        active_journeys = journeys_ref.where('isActive', '==', True).get()
+def eye_aspect_ratio(eye):
+    """Computes Eye Aspect Ratio (EAR) to detect eye closure"""
+    A = dist.euclidean(eye[1], eye[5])
+    B = dist.euclidean(eye[2], eye[4])
+    C = dist.euclidean(eye[0], eye[3])
+    return (A + B) / (2.0 * C)
+
+while True:
+    # ======= Handle Button Press =======
+    current_button_state = GPIO.input(BUTTON_PIN)
+    if current_button_state == GPIO.LOW and last_button_state == GPIO.HIGH:
+        if time.time() - last_toggle_time > 0.3:  # Debounce time 300ms
+            toggle_system()
+            last_toggle_time = time.time()
+    last_button_state = current_button_state
+
+    # ======= If system is paused, show date/time and rest time =======
+    if not system_active:
+        buzzer_off()
         
-        for journey in active_journeys:
-            if not journey.exists:
-                continue
-                
-            try:
-                # Add alert location to journey
-                journey.reference.update({
-                    'alertLocations': firestore.ArrayUnion([{
-                        'latitude': YOUR_CURRENT_LAT,  # You need to implement getting current GPS coordinates
-                        'longitude': YOUR_CURRENT_LONG,
-                        'timestamp': datetime.datetime.now(),
-                        'type': alert_type
-                    }])
-                })
-            except Exception as e:
-                print(f"Error updating journey: {e}")
-
-        # Send alert
-        alert_data = {
-            'type': alert_type,
-            'message': message,
-            'timestamp': datetime.datetime.now(),
-            'isActive': True
-        }
+        if rest_start_time is not None:
+            rest_duration = time.time() - rest_start_time  # Calculate rest time
         
-        db.collection('alerts').add(alert_data)
+        # Display rest time
+        rest_minutes = int(rest_duration // 60)
+        rest_seconds = int(rest_duration % 60)
+        rest_time_message = f"You Rested {rest_minutes}m {rest_seconds}s"
         
-    except Exception as e:
-        print(f"Firebase Error: {str(e)}")
-
-# ------------------- MAIN LOOP -------------------
-try:
-    consecutive_closed = 0
-    alert_active = False
-    
-    while True:
-        if paused:
-            time.sleep(1)
-            continue
-
-        # Capture frame from CSI Camera
-        frame = picam2.capture_array()
+        # Display real-time date and time
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # Add a small delay to prevent high CPU usage
-        time.sleep(0.1)  # 100ms delay
+        # Ensure the system isn't overloading the display with updates
+        if int(time.time()) % 2 == 0:  # Update every 2 seconds
+            lcd_message(rest_time_message, current_time)
         
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4)
+        continue
 
-        # ------------------- FACE MISSING DETECTION -------------------
-        if len(faces) == 0:
-            if face_missing_start_time is None:
-                face_missing_start_time = time.time()
-                update_lcd_status("No Face Detected")
-            elif time.time() - face_missing_start_time >= FACE_MISSING_THRESHOLD:
-                update_lcd_status("DRIVER MISSING!", "ALERT!")
-                buzzer_alert("DRIVER MISSING!")
-            continue  
+    # ======= Capture Frame =======
+    ret, frame = cap.read()
+    if not ret:
+        print("❌ ERROR: Failed to grab frame!")
+        lcd_message("Camera Error!", "Check Connection")
+        break
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    rects = detector(gray, 0)
+
+    # ======= Handle missing face case =======
+    if len(rects) == 0:
+        if face_missing_since is None:
+            face_missing_since = time.time()
+        elif time.time() - face_missing_since >= FACE_MISSING_TIME:
+            if not buzzer_active:
+                buzzer_on()
+                led_on()
+                buzzer_active = True
+            print("⚠ WARNING: No Face Detected!")
+            lcd_message("No Face Found!", "Wake Up!")
+    else:
+        face_missing_since = None
+        if buzzer_active:
+            buzzer_off()
+            led_off()
+            buzzer_active = False
+            lcd_message("Monitoring", "Face Detected")
+
+    for rect in rects:
+        shape = predictor(gray, rect)
+        shape = face_utils.shape_to_np(shape)
+
+        leftEye = shape[lStart:lEnd]
+        rightEye = shape[rStart:rEnd]
+        ear = (eye_aspect_ratio(leftEye) + eye_aspect_ratio(rightEye)) / 2.0
+
+        # ======= Drowsiness Detection =======
+        if ear < EYE_AR_THRESH:
+            if timer_start is None:
+                timer_start = time.time()
+            elif time.time() - timer_start >= EYE_CLOSED_TIME:
+                if not buzzer_active:
+                    buzzer_on()
+                    led_on()
+                    buzzer_active = True
+                    print("⚠ DROWSINESS ALERT: Eyes Closed!")
+                    lcd_message("Drowsiness!", "Wake Up!")
         else:
-            face_missing_start_time = None
-            GPIO.output(BUZZER_PIN, GPIO.LOW)
-            update_lcd_status("Driver Detected", "System Normal")
+            timer_start = None
+            if buzzer_active:
+                buzzer_off()
+                led_off()
+                buzzer_active = False
+                lcd_message("Monitoring", "Normal")
 
-        for (x, y, w, h) in faces:
-            roi_color = frame[y:y+h, x:x+w]
+    cv2.imshow("Driver Monitoring", frame)
 
-            # ------------------- DROWSINESS DETECTION -------------------
-            labels = ["Eye open", "Eye close", "Open mouth"]
-            predicted_class = predict_tflite(roi_color)
-            
-            if predicted_class is None:
-                continue  
+    if cv2.waitKey(1) & 0xFF == ord("q"):
+        break
 
-            detected_label = labels[predicted_class]
-
-            if predicted_class == 1:  # "Eye close"
-                consecutive_closed += 1
-                if consecutive_closed >= EYE_CONSECUTIVE_FRAMES:
-                    if eye_closed_start_time is None:
-                        eye_closed_start_time = time.time()
-                        update_lcd_status("Eyes Closed", "Monitoring...")
-                    elif time.time() - eye_closed_start_time >= EYE_CLOSED_DURATION:
-                        if not alert_active:
-                            update_lcd_status("WAKE UP!", "Eyes Closed 4s")
-                            alert_active = True
-                            send_drowsiness_alert('drowsy', 'Driver drowsiness detected - Eyes closed for too long!')
-                        buzzer_alert("WAKE UP!")
-            elif predicted_class == 0:  # "Eye open"
-                consecutive_closed = 0
-                eye_closed_start_time = None
-                if alert_active:
-                    GPIO.output(BUZZER_PIN, GPIO.LOW)
-                    alert_active = False
-                    update_lcd_status("Eyes Open", "System Normal")
-
-            # ------------------- YAWNING DETECTION -------------------
-            if predicted_class == 2:  # "Open mouth"
-                yawning_timestamps.append(time.time())
-
-                while yawning_timestamps and time.time() - yawning_timestamps[0] > 60:
-                    yawning_timestamps.popleft()
-
-                yawn_count = len(yawning_timestamps)
-                update_lcd_status(f"Yawning Detected", f"Count: {yawn_count}/3")
-
-                if yawn_count >= 3 and not nap_alert_triggered:
-                    update_lcd_status("Take a Break!", "Too Many Yawns")
-                    nap_alert_triggered = True
-                    send_drowsiness_alert('fatigue', 'Driver fatigue detected - Multiple yawns!')
-                    yawning_timestamps.clear()
-
-        cv2.imshow("Driver Monitoring", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-except KeyboardInterrupt:
-    print("\n🛑 Program manually stopped. Cleaning up...")
-    update_lcd_status("System Stopped", "Cleaning up...")
-    GPIO.output(BUZZER_PIN, GPIO.LOW)
-
-finally:
-    cv2.destroyAllWindows()
-    if lcd is not None:
-        try:
-            lcd.clear()
-            lcd.write_string("System Off")
-            time.sleep(1)
-            lcd.clear()
-            lcd.close(clear=True)
-        except:
-            pass
-    GPIO.cleanup()
-    print("✅ Resources released. Safe exit!")
+cap.release()
+cv2.destroyAllWindows()
+GPIO.cleanup()
