@@ -34,6 +34,7 @@ class _HomeScreenState extends State<HomeScreen> {
   double? _distance;
   List<PlaceSuggestion> _suggestions = [];
   bool _showSuggestions = false;
+  bool _isRouteInitialized = false;
 
   @override
   void initState() {
@@ -83,10 +84,8 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_currentPosition == null || _destinationLatLng == null) return;
 
     final String apiKey = 'AIzaSyDrQkjLbhOQRTmYTGmti785_MPrJFAj99w';
-    final String baseUrl =
-        'https://maps.googleapis.com/maps/api/directions/json';
-    final String url =
-        '$baseUrl?origin=${_currentPosition!.latitude},${_currentPosition!.longitude}'
+    final String baseUrl = 'https://maps.googleapis.com/maps/api/directions/json';
+    final String url = '$baseUrl?origin=${_currentPosition!.latitude},${_currentPosition!.longitude}'
         '&destination=${_destinationLatLng!.latitude},${_destinationLatLng!.longitude}'
         '&key=$apiKey';
 
@@ -95,8 +94,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final data = json.decode(response.body);
 
       if (data['status'] == 'OK') {
-        final points =
-            _decodePolyline(data['routes'][0]['overview_polyline']['points']);
+        final points = _decodePolyline(data['routes'][0]['overview_polyline']['points']);
         final distance = data['routes'][0]['legs'][0]['distance']['text'];
 
         setState(() {
@@ -105,14 +103,12 @@ class _HomeScreenState extends State<HomeScreen> {
             Polyline(
               polylineId: const PolylineId('route'),
               points: points,
-              color: Colors.blue, // Changed to red
-              width: 5, // Made slightly thicker
+              color: Colors.blue,
+              width: 5,
             ),
           );
 
-          // Update markers
           _markers.clear();
-          // Only add destination marker
           if (_destinationLatLng != null) {
             _markers.add(
               Marker(
@@ -123,24 +119,24 @@ class _HomeScreenState extends State<HomeScreen> {
             );
           }
 
-          // Update distance
-          _distance =
-              double.tryParse(distance.replaceAll(RegExp(r'[^0-9.]'), ''));
+          _distance = double.tryParse(distance.replaceAll(RegExp(r'[^0-9.]'), ''));
         });
 
-        // Adjust map bounds to show entire route
-        LatLngBounds bounds = LatLngBounds(
-          southwest: LatLng(
-            points.map((p) => p.latitude).reduce((a, b) => a < b ? a : b),
-            points.map((p) => p.longitude).reduce((a, b) => a < b ? a : b),
-          ),
-          northeast: LatLng(
-            points.map((p) => p.latitude).reduce((a, b) => a > b ? a : b),
-            points.map((p) => p.longitude).reduce((a, b) => a > b ? a : b),
-          ),
-        );
-        _mapController
-            ?.animateCamera(CameraUpdate.newLatLngBounds(bounds, 100));
+        // Only adjust camera on initial route setup, not during updates
+        if (!_isRouteInitialized) {
+          LatLngBounds bounds = LatLngBounds(
+            southwest: LatLng(
+              points.map((p) => p.latitude).reduce((a, b) => a < b ? a : b),
+              points.map((p) => p.longitude).reduce((a, b) => a < b ? a : b),
+            ),
+            northeast: LatLng(
+              points.map((p) => p.latitude).reduce((a, b) => a > b ? a : b),
+              points.map((p) => p.longitude).reduce((a, b) => a > b ? a : b),
+            ),
+          );
+          _mapController?.animateCamera(CameraUpdate.newLatLngBounds(bounds, 100));
+          _isRouteInitialized = true;
+        }
       }
     } catch (e) {
       print('Error getting directions: $e');
@@ -217,7 +213,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _searchLocation() async {
     if (_destinationController.text.isEmpty) return;
-
+    _isRouteInitialized = false;
     final String apiKey = 'AIzaSyDrQkjLbhOQRTmYTGmti785_MPrJFAj99w';
     final String baseUrl = 'https://maps.googleapis.com/maps/api/geocode/json';
     final String url =
