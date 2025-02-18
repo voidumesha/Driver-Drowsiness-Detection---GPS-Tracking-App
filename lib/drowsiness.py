@@ -6,9 +6,14 @@ import numpy as np
 import RPi.GPIO as GPIO
 from RPLCD.i2c import CharLCD
 import dlib
+import firebase_admin
+from firebase_admin import credentials, firestore
+import requests
+import threading
+
 
 # ===== GPIO Setup =====
-GPIO.setwarnings(False)
+GPIO.setwarnings(False)  
 GPIO.setmode(GPIO.BCM)
 
 BUZZER_PIN = 17
@@ -25,7 +30,7 @@ lcd = CharLCD(i2c_expander='PCF8574', address=0x27, port=1, cols=20, rows=4, dot
 lcd.clear()
 lcd.write_string("Initializing...")
 time.sleep(2)
-lcd.clear()
+    lcd.clear()
 
 # ===== System State Variables =====
 system_active = False
@@ -82,6 +87,7 @@ def toggle_system():
     print(f"System {'Activated' if system_active else 'Paused'}")
     
     if system_active:
+        # When system is activated
         buzzer_on()
         led_on()
         lcd_message("System Activated", "Monitoring ON", "", "")
@@ -89,11 +95,15 @@ def toggle_system():
         buzzer_off()
         led_off()
         
+        # Update break status to false when system is activated
+        update_break_status(False)
+        
         if first_activation:
-            first_activation = False  # Ignore first activation for rest tracking
+            first_activation = False
         else:
-            rest_start_time = None  # Reset rest time when system is activated
+            rest_start_time = None
     else:
+        # When system is paused
         buzzer_on()
         led_on()
         press_time = datetime.now().strftime("%H:%M:%S")
@@ -101,7 +111,10 @@ def toggle_system():
         time.sleep(1)
         buzzer_off()
         led_off()
-        rest_start_time = time.time()  # Start tracking rest time
+        rest_start_time = time.time()
+        
+        # Set break status to true when system is paused
+        update_break_status(True)
 
 # ===== OpenCV Face & Dlib Eye Detection Model Load =====
 print("[INFO] Loading OpenCV Haarcascades and Dlib Model...")
@@ -138,23 +151,155 @@ FACE_MISSING_TIME = 2  # Seconds before buzzer triggers
 face_missing_since = None
 timer_start = None
 buzzer_active = False
-buzzer_active = False  # Tracks if buzzer & LED should stay ON
 face_alert_triggered = False
 
-while True:
-    # ======= Handle Button Press =======
+# Firebase initialization
+cred = credentials.Certificate("/home/dasun/Downloads/serviceAccountKey.json")  # Update path
+firebase_admin.initialize_app(cred)
+db = firestore.client()
+
+# Add this function to update break status
+def update_break_status(is_breaking):
+    try:
+        # Get current active journey
+        journeys_ref = db.collection('journeys')
+        active_journeys = journeys_ref.where('isActive', '==', True).get()
+        
+        # Get current location (assuming you have GPS coordinates)
+        current_location = {
+            'latitude': current_lat,  # Your current GPS latitude
+            'longitude': current_lng  # Your current GPS longitude
+        }
+        
+        # Update break status with location
+        break_ref = db.collection('breaking').document('status')
+        break_ref.set({
+            'isBreaking': is_breaking,
+            'timestamp': datetime.now(),
+            'location': current_location,
+            'breakCount': firestore.Increment(1) if is_breaking else None
+        }, merge=True)
+
+        # Update journey with break details
+        for journey in active_journeys:
+            if is_breaking:
+                # Add break details to journey
+                journey.reference.update({
+                    'breaks': firestore.ArrayUnion([{
+                        'time': datetime.now(),
+                        'location': current_location,
+                        'duration': 20,  # 20 minutes break
+                        'breakNumber': (journey.get('totalBreaks') or 0) + 1
+                    }]),
+                    'totalBreaks': firestore.Increment(1)  # Increment break count
+                })
+                
+                print(f"Break #{journey.get('totalBreaks') or 1} recorded at location: {current_location}")
+                
+                # Update LCD with break information
+                lcd_message(
+                    f"Break #{journey.get('totalBreaks') or 1}",
+                    "Take 20min Rest",
+                    f"Lat: {current_lat:.4f}",
+                    f"Lng: {current_lng:.4f}"
+                )
+
+    except Exception as e:
+        print(f"Firebase Error: {str(e)}")
+
+
+def get_current_city(lat, lng):
+    try:
+        url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lng}&key={GOOGLE_MAPS_API_KEY}"
+        response = requests.get(url).json()
+        
+        if response['status'] == 'OK':
+            for component in response['results'][0]['address_components']:
+                if 'locality' in component['types']:
+                    city_name = component['long_name']
+                    # Update Firebase with current city
+                    db.collection('cities').document('current').set({
+                        'name': city_name,
+                        'timestamp': datetime.now()
+                    })
+                    return city_name
+    except Exception as e:
+        print(f"Error getting city: {e}")
+    return None
+
+# Update LCD display with current city
+def update_lcd_with_location():
+    try:
+        city_doc = db.collection('cities').document('current').get()
+        if city_doc.exists:
+            city_data = city_doc.to_dict()
+            lcd_message(
+                "Current Location:",
+                city_data['name'],
+                datetime.now().strftime("%H:%M:%S"),
+                ""
+            )
+except Exception as e:
+        print(f"Error updating LCD: {e}")
+
+# Add these global variables at the top
+is_drowsy_alert = False
+is_no_face_alert = False
+
+def handle_system_pause(channel):
+    global is_drowsy_alert, is_no_face_alert, buzzer_active, system_active
+    
+    if buzzer_active:  # Only update break status if buzzer was active
+        update_break_status(True)  # Set isBreaking to true
+        buzzer_off()
+        led_off()
+        buzzer_active = False
+        is_drowsy_alert = False
+        is_no_face_alert = False
+        system_active = False
+        lcd_message("System Paused", "Take 20min Break", "", "")
+    else:
+        toggle_system()  # Normal system toggle if no alert
+
+# Add at the top with other global variables
+break_end_notified = False
+
+def check_break_status():
+    global break_end_notified, system_active
+    try:
+        break_doc = db.collection('breaking').document('status').get()
+        if break_doc.exists:
+            data = break_doc.to_dict()
+            if data.get('isBreaking') and not system_active:  # Only check when system is paused
+                break_start = data.get('timestamp').timestamp()
+                current_time = time.time()
+                break_duration = current_time - break_start
+                
+                # Check if break time is over
+                if break_duration >= 20 * 60 and not break_end_notified:
+                    buzzer_on()
+                    led_on()
+                    lcd_message("Break Over!", "Ready to Drive", "", "")
+                    time.sleep(2)
+                    buzzer_off()
+                    led_off()
+                    break_end_notified = True
+                    
+                    # Don't automatically update break status
+                    # Let the system activation handle it
+    except Exception as e:
+        print(f"Error checking break status: {e}")
+
+# Add this function to track position updates
+def update_current_position(lat, lng):
+    global _currentPosition
+    _currentPosition = type('Position', (), {'latitude': lat, 'longitude': lng})()
+    
+    while True:
+    # Handle button press for alerts
     current_button_state = GPIO.input(BUTTON_PIN)
     if current_button_state == GPIO.LOW and last_button_state == GPIO.HIGH:
-        if buzzer_active:  # ✅ If buzzer is ON, turn it OFF with button
-            buzzer_off()
-            led_off()
-            buzzer_active = False
-            face_alert_triggered = False  # ✅ Reset the alert status
-            print("⚠ Alert Reset! Buzzer & LED turned OFF.")
-
-        else:  # ✅ If system is active, toggle normally
-            toggle_system()
-        last_toggle_time = time.time()
+        handle_system_pause(BUTTON_PIN)
     last_button_state = current_button_state
 
     
@@ -180,8 +325,10 @@ while True:
         # Third Row: Current date
         # Fourth Row: Alert message if rest time exceeds 20 minutes
         if rest_duration >= 20 * 60:  # 2 minutes (instead of 20 minutes for testing purposes)
+            update_break_status(True)
             alert_message = "Rest over!"
         else:
+            update_break_status(False)
             alert_message = ""
 
         lcd_message(
@@ -202,10 +349,10 @@ while True:
         continue  # ✅ Ensure loop continues smoothly
         buzzer_off()
         led_off()
-        buzzer_active = False
+        # ... rest of your pause logic ...
+                continue  
 
-
-    # ======= Capture Frame =======
+    # Capture and process frame
     ret, frame = cap.read()
     if not ret:
         print("❌ ERROR: Failed to grab frame!")
@@ -218,45 +365,35 @@ while True:
     # Detect faces using Haarcascade
     faces = face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5, minSize=(30, 30))
 
-    # ======= Handle missing face case =======
+    # Handle missing face case
     if len(faces) == 0:
         if face_missing_since is None:
             face_missing_since = time.time()
-
         elif time.time() - face_missing_since >= FACE_MISSING_TIME:
-            if not face_alert_triggered:  # ✅ Only trigger alert once
-                lcd_message("Stop vehicle!", "Take rest 20min!", "", "")
-                buzzer_on()
-                led_on()
-                buzzer_active = True  # ✅ Keep buzzer ON
-                face_alert_triggered = True  # ✅ Mark alert as triggered
-                print("🚨 Face missing alert triggered! Buzzer ON.")
-
+            is_no_face_alert = True
+            buzzer_on()
+            led_on()
+            buzzer_active = True
+            lcd_message("Stop vehicle!", "Take rest!", "", "")
+            print("🚨 Face missing alert triggered! Buzzer ON.")
     else:
-        face_missing_since = None  # ✅ Reset timer when face is detected
+        face_missing_since = None
 
-    # ✅ Even if face is detected, keep buzzer ON until button is pressed
-    if buzzer_active:
-        buzzer_on()
-        led_on()
-
-    
-
-# Detect landmarks using Dlib
+    # Handle eye closure detection
     for face in faces:
         (x, y, w, h) = face
         landmarks = predictor(gray, dlib.rectangle(x, y, x + w, y + h))
 
-    # Define the indices for the left and right eye (using Dlib's shape predictor)
+        # Define the indices for the left and right eye (using Dlib's shape predictor)
         left_eye = landmarks.parts()[36:42]  # Left eye landmarks (points 36 to 41)
         right_eye = landmarks.parts()[42:48]  # Right eye landmarks (points 42 to 47)
 
-    # Check if the eyes are closed based on landmarks (for simplicity, you can compare the eye aspect ratio)
+        # Check if the eyes are closed based on landmarks (for simplicity, you can compare the eye aspect ratio)
         def eye_aspect_ratio(eye):
-        # Convert dlib points to NumPy arrays for easier calculation
+            # Convert dlib points to NumPy arrays for easier calculation
             eye = np.array([(point.x, point.y) for point in eye])
 
-        # Calculate the distances between vertical eye landmarks
+            # Calculate the distances between vertical eye landmarks
             A = np.linalg.norm(eye[1] - eye[5])  # Vertical distance
             B = np.linalg.norm(eye[2] - eye[4])  # Vertical distance
             C = np.linalg.norm(eye[0] - eye[3])  # Horizontal distance
@@ -276,29 +413,44 @@ while True:
         if ear < 0.25:  # Threshold value for closed eyes
             if timer_start is None:
                 timer_start = time.time()
-                print("Timer started due to closed eyes")
         elif ear >= 0.25:
-            # Reset timer if eyes open
             timer_start = None
-            print("Eyes are open, timer reset")
 
-        if timer_start is not None:
-            if time.time() - timer_start >= EYE_CLOSED_TIME:
-                buzzer_on()
-                led_on()
-                lcd_message("Take Rest!", "For 10 min", "", "")
-                print("Buzzer and LED turned on due to eye closure for 4 seconds")
-            else:
-                buzzer_off()
-                led_off()
-                lcd_message("Monitoring", "Monitor", "Normal", "")
-                print("Eyes are closed, but not long enough yet")
+        if timer_start is not None and time.time() - timer_start >= EYE_CLOSED_TIME:
+            is_drowsy_alert = True
+            buzzer_on()
+            led_on()
+            buzzer_active = True
+            lcd_message("Take Rest!", "Press Button", "", "")
+            print("🚨 Drowsiness detected! Buzzer ON.")
+        elif not is_drowsy_alert and not is_no_face_alert:
+            buzzer_off()
+            led_off()
+            buzzer_active = False
+            lcd_message("Monitoring", "Normal", "", "")
 
+    # Keep buzzer and LED on if any alert is active until button is pressed
+    if is_drowsy_alert or is_no_face_alert:
+        buzzer_on()
+        led_on()
+        buzzer_active = True
 
-    cv2.imshow("Driver Monitoring", frame)
+    # Check break status
+    check_break_status()
+    
+    # Reset break_end_notified when a new break starts
+    if not system_active:
+        break_end_notified = False
+
+    # Update current position (if you have GPS)
+    if current_lat and current_lng:  # Your GPS variables
+        update_current_position(current_lat, current_lng)
+
+        cv2.imshow("Driver Monitoring", frame)
     if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
+            break
 
+# Cleanup
 cap.release()
-cv2.destroyAllWindows()
-GPIO.cleanup()
+    cv2.destroyAllWindows()
+    GPIO.cleanup()

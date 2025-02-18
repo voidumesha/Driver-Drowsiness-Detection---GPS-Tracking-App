@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'admin_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/alert_service.dart';
+import 'dart:async';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -35,6 +36,9 @@ class _HomeScreenState extends State<HomeScreen> {
   List<PlaceSuggestion> _suggestions = [];
   bool _showSuggestions = false;
   bool _isRouteInitialized = false;
+  Timer? _breakTimer;
+  int _remainingBreakTime = 20 * 60; // 20 minutes in seconds
+  LatLng? _breakLocation;
 
   @override
   void initState() {
@@ -43,6 +47,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _restorePreviousRoute();
     _setupLocationUpdates();
     _listenToAlerts();
+    _listenToBreakStatus();
   }
 
   void _setupLocationUpdates() {
@@ -84,8 +89,10 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_currentPosition == null || _destinationLatLng == null) return;
 
     final String apiKey = 'AIzaSyDrQkjLbhOQRTmYTGmti785_MPrJFAj99w';
-    final String baseUrl = 'https://maps.googleapis.com/maps/api/directions/json';
-    final String url = '$baseUrl?origin=${_currentPosition!.latitude},${_currentPosition!.longitude}'
+    final String baseUrl =
+        'https://maps.googleapis.com/maps/api/directions/json';
+    final String url =
+        '$baseUrl?origin=${_currentPosition!.latitude},${_currentPosition!.longitude}'
         '&destination=${_destinationLatLng!.latitude},${_destinationLatLng!.longitude}'
         '&key=$apiKey';
 
@@ -94,7 +101,8 @@ class _HomeScreenState extends State<HomeScreen> {
       final data = json.decode(response.body);
 
       if (data['status'] == 'OK') {
-        final points = _decodePolyline(data['routes'][0]['overview_polyline']['points']);
+        final points =
+            _decodePolyline(data['routes'][0]['overview_polyline']['points']);
         final distance = data['routes'][0]['legs'][0]['distance']['text'];
 
         setState(() {
@@ -119,7 +127,8 @@ class _HomeScreenState extends State<HomeScreen> {
             );
           }
 
-          _distance = double.tryParse(distance.replaceAll(RegExp(r'[^0-9.]'), ''));
+          _distance =
+              double.tryParse(distance.replaceAll(RegExp(r'[^0-9.]'), ''));
         });
 
         // Only adjust camera on initial route setup, not during updates
@@ -134,7 +143,8 @@ class _HomeScreenState extends State<HomeScreen> {
               points.map((p) => p.longitude).reduce((a, b) => a > b ? a : b),
             ),
           );
-          _mapController?.animateCamera(CameraUpdate.newLatLngBounds(bounds, 100));
+          _mapController
+              ?.animateCamera(CameraUpdate.newLatLngBounds(bounds, 100));
           _isRouteInitialized = true;
         }
       }
@@ -239,30 +249,70 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _handleStartStop(bool isStarting) async {
     try {
-      await _locationService.updateLocation(
-        isStarting,
-        destination: _destinationLatLng,
-      );
+      if (isStarting) {
+        // Check if destination is set
+        if (_destinationLatLng == null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Please enter a destination first'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+          return;
+        }
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(isStarting ? 'Journey Started' : 'Location Saved'),
-        ),
-      );
+        // Start journey
+        await _locationService.updateLocation(true,
+            destination: _destinationLatLng);
 
-      if (!isStarting) {
-        // Save the current route state
-        final prefs = await SharedPreferences.getInstance();
-        if (_destinationLatLng != null) {
-          await prefs.setDouble('dest_lat', _destinationLatLng!.latitude);
-          await prefs.setDouble('dest_lng', _destinationLatLng!.longitude);
-          await prefs.setString('dest_address', _destinationController.text);
+        // Show success message
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Row(
+                children: [
+                  const Icon(Icons.directions_car, color: Colors.white),
+                  const SizedBox(width: 8),
+                  Text('Journey started to ${_destinationController.text}'),
+                ],
+              ),
+              backgroundColor: Colors.green,
+              duration: const Duration(seconds: 3),
+            ),
+          );
+        }
+      } else {
+        // Stop journey
+        await _locationService.updateLocation(false);
+
+        // Clear map and show completion message
+        setState(() {
+          _markers.clear();
+          _polylines.clear();
+          _destinationLatLng = null;
+          _destinationController.clear();
+          _distance = null;
+        });
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Journey completed and saved to reports'),
+              backgroundColor: Colors.blue,
+              duration: Duration(seconds: 3),
+            ),
+          );
         }
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.toString())),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: ${e.toString()}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
@@ -319,6 +369,51 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     }, onError: (error) {
       print('Error listening to alerts: $error');
+    });
+  }
+
+  void _listenToBreakStatus() {
+    AlertService.getBreakStatus().listen((snapshot) {
+      if (snapshot.exists) {
+        final data = snapshot.data() as Map<String, dynamic>;
+        final isBreaking = data['isBreaking'] as bool;
+
+        setState(() {
+          if (isBreaking) {
+            // Start or resume break timer
+            _remainingBreakTime = 1 * 60; // Reset to 20 minutes
+            _startBreakTimer();
+
+            // Show break notification
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Break time started - 20 minutes'),
+                backgroundColor: Colors.orange,
+              ),
+            );
+          } else {
+            // Cancel timer if break is over
+            _breakTimer?.cancel();
+            _breakTimer = null;
+            _remainingBreakTime = 0;
+          }
+        });
+      }
+    });
+  }
+
+  void _startBreakTimer() {
+    _breakTimer?.cancel(); // Cancel any existing timer
+    _breakTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      setState(() {
+        if (_remainingBreakTime > 0) {
+          _remainingBreakTime--;
+        } else {
+          _breakTimer?.cancel();
+          _breakTimer = null;
+          AlertService.updateBreakStatus(false);
+        }
+      });
     });
   }
 
@@ -413,6 +508,31 @@ class _HomeScreenState extends State<HomeScreen> {
                       fontSize: 16, fontWeight: FontWeight.bold),
                 ),
               ),
+            if (_breakTimer != null)
+              Padding(
+                padding: const EdgeInsets.all(8.0),
+                child: Card(
+                  color: Colors.orange[100],
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      children: [
+                        const Text(
+                          'Rest Time Remaining:',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        Text(
+                          '${_remainingBreakTime ~/ 60}:${(_remainingBreakTime % 60).toString().padLeft(2, '0')}',
+                          style: const TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             SizedBox(
               height: MediaQuery.of(context).size.height * 0.6,
               child: _currentPosition == null
@@ -463,6 +583,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _locationService.onLocationUpdate = null;
+    _breakTimer?.cancel();
     super.dispose();
   }
 }

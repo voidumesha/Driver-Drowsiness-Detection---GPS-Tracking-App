@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'package:url_launcher/url_launcher.dart';
 
 class AdminScreen extends StatelessWidget {
   const AdminScreen({super.key});
@@ -43,27 +44,56 @@ class AdminScreen extends StatelessWidget {
           return ListView.builder(
             itemCount: snapshot.data!.docs.length,
             itemBuilder: (context, index) {
-              final doc = snapshot.data!.docs[index];
-              final data = doc.data();
+              final data = snapshot.data!.docs[index].data();
+              final startTime = (data['startTime'] as Timestamp).toDate();
+              final endTime = data['endTime'] != null
+                  ? (data['endTime'] as Timestamp).toDate()
+                  : null;
 
               return ExpansionTile(
                 title: Text('Journey ${index + 1}'),
-                subtitle: Text(
-                    'Status: ${data['isActive'] ? 'Active' : 'Completed'}\n'
-                    'Started: ${(data['startTime'] as Timestamp).toDate().toString().split('.')[0]}'),
-                children: [
-                  FutureBuilder<String>(
-                    future: _getAddress(
-                      data['startLocation']['latitude'],
-                      data['startLocation']['longitude'],
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Date: ${startTime.toString().split('.')[0]}'),
+                    StreamBuilder<DocumentSnapshot>(
+                      stream: FirebaseFirestore.instance
+                          .collection('breaking')
+                          .doc('status')
+                          .snapshots(),
+                      builder: (context, breakSnapshot) {
+                        int breakCount = 0;
+                        if (breakSnapshot.hasData &&
+                            breakSnapshot.data!.exists) {
+                          breakCount = (breakSnapshot.data!.data()
+                                  as Map<String, dynamic>)['breakCount'] ??
+                              0;
+                        }
+                        return Text('Total Breaks: $breakCount');
+                      },
                     ),
-                    builder: (context, startSnapshot) {
-                      return ListTile(
-                        title: Text('Start Location:'),
-                        subtitle: Text(startSnapshot.data ?? 'Loading...'),
-                      );
-                    },
-                  ),
+                    if (data['distance'] != null)
+                      Text(
+                          'Distance: ${(double.parse(data['distance'].toString())).toStringAsFixed(2)} km'),
+                  ],
+                ),
+                children: [
+                  // Start Location with address
+                  if (data['startLocation'] != null)
+                    FutureBuilder<String>(
+                      future: _getAddress(
+                        data['startLocation']['latitude'],
+                        data['startLocation']['longitude'],
+                      ),
+                      builder: (context, startSnapshot) {
+                        return ListTile(
+                          title: const Text('Start Location:'),
+                          subtitle: Text(startSnapshot.data ?? 'Loading...'),
+                        );
+                      },
+                    ),
+
+                  // Destination with address
                   if (data['destination'] != null)
                     FutureBuilder<String>(
                       future: _getAddress(
@@ -72,45 +102,80 @@ class AdminScreen extends StatelessWidget {
                       ),
                       builder: (context, destSnapshot) {
                         return ListTile(
-                          title: Text('Destination:'),
+                          title: const Text('Destination:'),
                           subtitle: Text(destSnapshot.data ?? 'Loading...'),
                         );
                       },
                     ),
-                  if (data['breaks'] != null)
-                    ...List.generate(
-                      (data['breaks'] as List).length,
-                      (i) => FutureBuilder<String>(
-                        future: _getAddress(
-                          data['breaks'][i]['location']['latitude'],
-                          data['breaks'][i]['location']['longitude'],
+
+                  // Break History
+                  if (data['breaks'] != null &&
+                      (data['breaks'] as List).isNotEmpty)
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Padding(
+                          padding: EdgeInsets.all(8.0),
+                          child: Text(
+                            'Break History',
+                            style: TextStyle(
+                                fontSize: 18, fontWeight: FontWeight.bold),
+                          ),
                         ),
-                        builder: (context, breakSnapshot) {
-                          return ListTile(
-                            title: Text('Break ${i + 1}:'),
-                            subtitle: Text(
-                                'Time: ${(data['breaks'][i]['time'] as Timestamp).toDate().toString().split('.')[0]}\n'
-                                'Location: ${breakSnapshot.data ?? 'Loading...'}'),
-                          );
-                        },
-                      ),
-                    ),
-                  if (data['alertLocations'] != null)
-                    ...List.generate(
-                      (data['alertLocations'] as List).length,
-                      (i) => FutureBuilder<String>(
-                        future: _getAddress(
-                          data['alertLocations'][i]['latitude'],
-                          data['alertLocations'][i]['longitude'],
+                        ...List.generate(
+                          (data['breaks'] as List).length,
+                          (i) => FutureBuilder<String>(
+                            future: _getAddress(
+                              data['breaks'][i]['location']['latitude'],
+                              data['breaks'][i]['location']['longitude'],
+                            ),
+                            builder: (context, breakSnapshot) {
+                              final breakTime =
+                                  (data['breaks'][i]['time'] as Timestamp)
+                                      .toDate()
+                                      .toString()
+                                      .split('.')[0];
+                              return Card(
+                                margin: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 4),
+                                child: ListTile(
+                                  leading: CircleAvatar(
+                                    child: Text('${i + 1}'),
+                                  ),
+                                  title: Text('Break #${i + 1}'),
+                                  subtitle: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text('Time: $breakTime'),
+                                      Text(
+                                          'Location: ${breakSnapshot.data ?? 'Loading...'}'),
+                                      if (data['breaks'][i]['duration'] != null)
+                                        Text(
+                                            'Duration: ${data['breaks'][i]['duration']} minutes'),
+                                      TextButton(
+                                        onPressed: () async {
+                                          final lat = data['breaks'][i]
+                                              ['location']['latitude'];
+                                          final lng = data['breaks'][i]
+                                              ['location']['longitude'];
+                                          final url =
+                                              'https://www.google.com/maps/search/?api=1&query=$lat,$lng';
+                                          if (await canLaunchUrl(
+                                              Uri.parse(url))) {
+                                            await launchUrl(Uri.parse(url));
+                                          }
+                                        },
+                                        child: const Text('View on Map'),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
                         ),
-                        builder: (context, alertSnapshot) {
-                          return ListTile(
-                            leading: Icon(Icons.warning, color: Colors.red),
-                            title: Text('Alert Location ${i + 1}:'),
-                            subtitle: Text(alertSnapshot.data ?? 'Loading...'),
-                          );
-                        },
-                      ),
+                      ],
                     ),
                 ],
               );
