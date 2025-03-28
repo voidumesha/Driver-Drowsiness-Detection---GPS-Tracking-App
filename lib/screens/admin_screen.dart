@@ -9,7 +9,7 @@ class AdminScreen extends StatelessWidget {
 
   Future<String> _getAddress(double lat, double lng) async {
     try {
-      final String apiKey = 'AIzaSyDrQkjLbhOQRTmYTGmti785_MPrJFAj99w';
+      final String apiKey = 'APIKEY';
       final String url =
           'https://maps.googleapis.com/maps/api/geocode/json?latlng=$lat,$lng&key=$apiKey';
 
